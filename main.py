@@ -17,10 +17,14 @@ if not GEMINI_KEY or not GITHUB_TOKEN or not REPO_NAME:
 
 genai.configure(api_key=GEMINI_KEY)
 
+# Reliable Model Initialization Standard
 try:
-    model = genai.GenerativeModel('gemini-1.5-flash-latest')
+    model = genai.GenerativeModel('gemini-1.5-flash')
 except Exception:
-    model = genai.GenerativeModel('gemini-pro')
+    try:
+        model = genai.GenerativeModel('gemini-1.5-pro')
+    except Exception:
+        model = genai.GenerativeModel('gemini-pro')
 
 # 2. Diff-Based File Detection
 def get_changed_files():
@@ -99,7 +103,6 @@ def main():
 
     main_branch = repo.get_branch("main")
     
-    # Ensure branch reference exists or updates smoothly
     try:
         ref = repo.get_git_ref(f"heads/{branch_name}")
         ref.edit(main_branch.commit.sha, force=True)
