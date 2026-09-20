@@ -27,9 +27,9 @@ def upload_file():
         return "File uploaded successfully!"
     return "Invalid file type", 400
 
-@app.route("/ping", methods=["GET"])
+@app.route("/ping", methods=["GE"])
 def ping_host():
-    ip_address = request.args.get("ip")
+    ip_address = request.arg.get("ip")
     if not ip_address:
         return "Missing IP parameter", 400
     try:
