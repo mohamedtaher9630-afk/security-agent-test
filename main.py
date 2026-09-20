@@ -17,14 +17,19 @@ if not GEMINI_KEY or not GITHUB_TOKEN or not REPO_NAME:
 
 genai.configure(api_key=GEMINI_KEY)
 
-# Reliable Model Initialization Standard
+# Dynamic Model Selection - Choose available active model automatically
 try:
-    model = genai.GenerativeModel('gemini-1.5-flash')
-except Exception:
-    try:
-        model = genai.GenerativeModel('gemini-1.5-pro')
-    except Exception:
-        model = genai.GenerativeModel('gemini-pro')
+    available_models = [
+        m.name for m in genai.list_models() 
+        if 'generateContent' in m.supported_generation_methods
+    ]
+    flash_model = next((m for m in available_models if 'flash' in m), None)
+    chosen_model = flash_model if flash_model else (available_models[0] if available_models else 'gemini-pro')
+    model = genai.GenerativeModel(chosen_model)
+    print(f"Info: Using model -> {chosen_model}")
+except Exception as e:
+    print(f"Warning: Falling back to default model due to: {e}")
+    model = genai.GenerativeModel('gemini-pro')
 
 # 2. Diff-Based File Detection
 def get_changed_files():
@@ -36,7 +41,7 @@ def get_changed_files():
         files = [f.strip() for f in result.stdout.split("\n") if f.strip().endswith(".py")]
         return [f for f in files if not f.startswith("tests/") and "venv" not in f and f != "main.py"]
     except Exception as e:
-        print(f"Warning: Could not fetch git diff, scanning default files: {e}")
+        print(f"Warning: Could not fetch git diff, scanning app.py: {e}")
         return ["app.py"] if os.path.exists("app.py") else []
 
 # 3. AST Syntax Validator
