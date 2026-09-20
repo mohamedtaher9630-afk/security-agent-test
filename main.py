@@ -16,7 +16,12 @@ if not GEMINI_KEY or not GITHUB_TOKEN or not REPO_NAME:
     sys.exit(1)
 
 genai.configure(api_key=GEMINI_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
+
+# Updated model initialization to prevent 404 API version mismatches
+try:
+    model = genai.GenerativeModel('gemini-1.5-flash-latest')
+except Exception:
+    model = genai.GenerativeModel('gemini-pro')
 
 # 2. Diff-Based File Detection
 def get_changed_files():
@@ -26,7 +31,6 @@ def get_changed_files():
             capture_output=True, text=True, check=True
         )
         files = [f.strip() for f in result.stdout.split("\n") if f.strip().endswith(".py")]
-        # Exclude test directories, virtual environments, and the main runner
         return [f for f in files if not f.startswith("tests/") and "venv" not in f and f != "main.py"]
     except Exception as e:
         print(f"Warning: Could not fetch git diff, scanning default files: {e}")
