@@ -1,151 +1,146 @@
 import os
 import sys
-import ast
 import json
-import subprocess
-from github import Github
+import ast
 import google.generativeai as genai
+from github import Github
 
-# 1. Environment Setup & Configuration
-GEMINI_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
-REPO_NAME = os.getenv("GITHUB_REPOSITORY")
+# 1. Verification of environment setup
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GH_TOKEN = os.getenv("GH_TOKEN")
+GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY")
 
-if not GEMINI_KEY or not GITHUB_TOKEN or not REPO_NAME:
+if not GEMINI_API_KEY or not GH_TOKEN or not GITHUB_REPOSITORY:
     print("Error: Missing required environment variables.")
     sys.exit(1)
 
-genai.configure(api_key=GEMINI_KEY)
+# Configure Gemini API
+genai.configure(api_key=GEMINI_API_KEY)
 
-# Initialize recommended model directly
-try:
-    model = genai.GenerativeModel('gemini-3.6-flash')
-except Exception:
-    model = genai.GenerativeModel('gemini-1.5-flash')
+# Force Gemini to return strictly valid JSON
+generation_config = {
+    "response_mime_type": "application/json",
+    "temperature": 0.2
+}
 
-# 2. Diff-Based File Detection
-def get_changed_files():
+model = genai.GenerativeModel(
+    model_name='gemini-3.6-flash',
+    generation_config=generation_config
+)
+
+def scan_file(file_path):
+    print(f"Scanning {file_path}...")
     try:
-        result = subprocess.run(
-            ["git", "diff", "--name-only", "HEAD~1", "HEAD"],
-            capture_output=True, text=True, check=True
-        )
-        files = [f.strip() for f in result.stdout.split("\n") if f.strip().endswith(".py")]
-        return [f for f in files if not f.startswith("tests/") and "venv" not in f and f != "main.py"]
+        with open(file_path, "r", encoding="utf-8") as f:
+            code_content = f.read()
     except Exception as e:
-        print(f"Warning: Could not fetch git diff, scanning default files: {e}")
-        return ["app.py"] if os.path.exists("app.py") else []
+        print(f"Failed to read {file_path}: {e}")
+        return None
 
-# 3. AST Syntax Validator
-def validate_python_code(code_str):
+    prompt = f"""
+    You are an expert DevSecOps security reviewer.
+    Analyze the following Python code for security vulnerabilities (e.g., SQL Injection, Hardcoded Secrets, XSS, Remote Code Execution).
+    
+    Code to audit:
+    ```python
+    {code_content}
+    ```
+
+    Respond strictly in JSON format with the following keys:
+    - "vulnerable": boolean (true if severe vulnerabilities are found, false otherwise)
+    - "vulnerability_details": string (Markdown description explaining the detected vulnerabilities and recommendations)
+    - "fixed_code": string (The complete, corrected Python code without any markdown code fences like ```python)
+    """
+
+    try:
+        response = model.generate_content(prompt)
+        # Parse strict JSON output
+        result = json.loads(response.text)
+        return result
+    except Exception as e:
+        print(f"Warning: Error during AI analysis or JSON parsing: {e}")
+        return None
+
+def validate_ast(code_str):
     try:
         ast.parse(code_str)
-        return True, ""
+        return True
     except SyntaxError as e:
-        return False, str(e)
+        print(f"AST Validation Failed: {e}")
+        return False
 
-# 4. System Instructions
-SYSTEM_INSTRUCTION = """
-You are a Principal DevSecOps & Application Security Engineer.
-Analyze the provided source code for vulnerabilities.
-Tasks:
-1. Identify true security vulnerabilities and ignore false positives.
-2. Assign severity levels: CRITICAL, HIGH, or MEDIUM.
-3. Patch the code WITHOUT breaking or altering the underlying business logic.
-4. Output STRICTLY a valid JSON object with the following schema:
-   {
-     "report": "A detailed Markdown report explaining issues found and patches applied.",
-     "patched_code": "The complete patched source code as plain text. Do NOT wrap in markdown triple backticks."
-   }
-"""
-
-def analyze_and_fix(file_path, code_content):
-    prompt = f"{SYSTEM_INSTRUCTION}\n\nFile Path: {file_path}\nCode Content:\n{code_content}"
-    response = model.generate_content(prompt)
-    
-    raw_text = response.text.strip()
-    if "```json" in raw_text:
-        raw_text = raw_text.split("```json")[1].split("```")[0].strip()
-    elif "```" in raw_text:
-        raw_text = raw_text.split("```")[1].split("```")[0].strip()
-        
-    try:
-        data = json.loads(raw_text)
-        report = data.get("report", "No security report provided.")
-        patched_code = data.get("patched_code", code_content)
-        
-        is_valid, error = validate_python_code(patched_code)
-        if not is_valid:
-            print(f"Warning: AI generated invalid syntax for {file_path}: {error}. Reverting to original.")
-            return report, code_content
-            
-        return report, patched_code
-    except Exception as e:
-        print(f"Warning: Failed to parse AI JSON response: {e}")
-        return "No critical vulnerabilities found or failed parsing.", code_content
-
-# 5. Core Execution & GitHub Automation
 def main():
-    files_to_scan = get_changed_files()
-    if not files_to_scan:
-        print("Success: No modified Python files to scan.")
+    target_file = "app.py"
+    if not os.path.exists(target_file):
+        print(f"Target file {target_file} not found.")
         sys.exit(0)
 
-    gh = Github(GITHUB_TOKEN)
-    repo = gh.get_repo(REPO_NAME)
-    
-    full_report = "## 🛡️ Enterprise AI DevSecOps Audit Report\n\n"
-    has_fixes = False
-    branch_name = "ai-security-patch-pro"
+    audit_result = scan_file(target_file)
 
-    main_branch = repo.get_branch("main")
-    
-    try:
-        ref = repo.get_git_ref(f"heads/{branch_name}")
-        ref.edit(main_branch.commit.sha, force=True)
-    except Exception:
-        repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=main_branch.commit.sha)
-
-    for file_path in files_to_scan:
-        if not os.path.exists(file_path):
-            continue
-        print(f"Scanning {file_path}...")
-        with open(file_path, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        report, patched_code = analyze_and_fix(file_path, content)
-        
-        if patched_code != content:
-            has_fixes = True
-            full_report += f"### 📄 `{file_path}`\n{report}\n\n---\n"
-            
-            try:
-                file_obj = repo.get_contents(file_path, ref=branch_name)
-                repo.update_file(
-                    path=file_path,
-                    message=f"security: enterprise auto-patch for {file_path}",
-                    content=patched_code,
-                    sha=file_obj.sha,
-                    branch=branch_name
-                )
-            except Exception as e:
-                print(f"Error updating file on branch: {e}")
-
-    if has_fixes:
-        pr_title = "🔒 Enterprise Security Patch: Automated AI Vulnerability Remediation"
-        prs = repo.get_pulls(state="open", head=f"{repo.owner.login}:{branch_name}")
-        if prs.totalCount == 0:
-            repo.create_pull(
-                title=pr_title,
-                body=full_report,
-                head=branch_name,
-                base="main"
-            )
-            print("Success: Enterprise Pull Request created successfully!")
-        else:
-            print("Info: Pull Request updated successfully.")
-    else:
+    if not audit_result or not audit_result.get("vulnerable"):
         print("Success: Code passed all enterprise security checks cleanly!")
+        sys.exit(0)
+
+    print("Security vulnerability detected by Gemini!")
+    vulnerability_details = audit_result.get("vulnerability_details", "Vulnerability detected.")
+    fixed_code = audit_result.get("fixed_code", "")
+
+    # Clean up any accidental markdown blocks in fixed code
+    if fixed_code.startswith("```python"):
+        fixed_code = fixed_code.replace("```python", "").rstrip("```").strip()
+
+    # Validate AST of the generated patch
+    if not validate_ast(fixed_code):
+        print("Error: AI-generated code patch failed AST syntax validation!")
+        sys.exit(1)
+
+    print("AST Validation successful. Proceeding to create Pull Request...")
+
+    # GitHub API Integration
+    g = Github(GH_TOKEN)
+    repo = g.get_repo(GITHUB_REPOSITORY)
+
+    branch_name = "ai-security-patch-pro"
+    default_branch = repo.default_branch
+
+    # Get reference of main branch
+    main_ref = repo.get_git_ref(f"heads/{default_branch}")
+    main_sha = main_ref.object.sha
+
+    # Create new branch for patch if it doesn't exist
+    try:
+        repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=main_sha)
+        print(f"Created branch: {branch_name}")
+    except Exception:
+        print(f"Branch {branch_name} already exists. Updating reference...")
+        ref = repo.get_git_ref(f"heads/{branch_name}")
+        ref.edit(sha=main_sha, force=True)
+
+    # Commit patched code to the new branch
+    contents = repo.get_contents(target_file, ref=branch_name)
+    repo.update_file(
+        path=target_file,
+        message="🔒 DevSecOps Auto-Fix: Patch security vulnerabilities",
+        content=fixed_code,
+        sha=contents.sha,
+        branch=branch_name
+    )
+
+    # Create Pull Request
+    pr_body = f"## 🛡️ Automated DevSecOps AI Security Audit\n\n{vulnerability_details}\n\n---\n*Patched automatically using `gemini-3.6-flash` and validated via Python AST parser.*"
+    
+    # Check if PR already exists
+    prs = repo.get_pulls(state='open', head=f"{repo.owner.login}:{branch_name}", base=default_branch)
+    if prs.totalCount == 0:
+        pr = repo.create_pull(
+            title="🚨 DevSecOps Patch: Fix Identified Security Vulnerabilities",
+            body=pr_body,
+            head=branch_name,
+            base=default_branch
+        )
+        print(f"Successfully created Pull Request: {pr.html_url}")
+    else:
+        print(f"Pull Request already exists: {prs[0].html_url}")
 
 if __name__ == "__main__":
     main()
