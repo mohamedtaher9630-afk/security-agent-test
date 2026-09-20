@@ -4,7 +4,7 @@ from flask import Flask, request, render_template_string
 import sqlite3
 
 app = Flask(__name__)
-
+hardcoded_password = "12345"
 @app.route('/')
 def index():
     user_input = request.args.get('name', 'Guest')
