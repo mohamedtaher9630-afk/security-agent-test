@@ -1,24 +1,43 @@
 import os
+import subprocess
+import ipaddress
 from flask import Flask, request
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
+UPLOAD_FOLDER = "./uploads"
+ALLOWED_EXTENSIONS = {"txt", "pdf", "png", "jpg", "jpeg", "gif"}
 
-# ثغرة 1: Unrestricted File Upload - قبول رفع أي ملف دون الفحص أو التحقق من الامتداد
+if not os.path.exists(UPLOAD_FOLDER):
+    os.makedirs(UPLOAD_FOLDER)
+
+def allowed_file(filename):
+    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+
 @app.route("/upload", methods=["POST"])
 def upload_file():
-    uploaded_file = request.files['file']
-    # حفظ الملف مباشرة في المجلد العام بدون تنظيف اسم الملف أو فحص امتداده
-    uploaded_file.save(os.path.join("./uploads", uploaded_file.filename))
-    return "File uploaded successfully!"
+    if "file" not in request.files:
+        return "No file part", 400
+    uploaded_file = request.files["file"]
+    if uploaded_file.filename == "":
+        return "No selected file", 400
+    if uploaded_file and allowed_file(uploaded_file.filename):
+        filename = secure_filename(uploaded_file.filename)
+        uploaded_file.save(os.path.join(UPLOAD_FOLDER, filename))
+        return "File uploaded successfully!"
+    return "Invalid file type", 400
 
-# ثغرة 2: Command Injection - تنفيذ أوامر النظام مباشرة باستخدام مدخلات المستخدم
 @app.route("/ping", methods=["GET"])
 def ping_host():
     ip_address = request.args.get("ip")
-    # دمج مدخلات المستخدم مباشرة داخل أمر النظام يتيح للمخترق تنفيذ أي أمر عبر os.system
-    command = f"ping -c 1 {ip_address}"
-    os.system(command)
+    if not ip_address:
+        return "Missing IP parameter", 400
+    try:
+        ipaddress.ip_address(ip_address)
+    except ValueError:
+        return "Invalid IP address", 400
+    subprocess.run(["ping", "-c", "1", ip_address], check=True)
     return "Ping completed!"
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=False)
