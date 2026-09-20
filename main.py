@@ -17,7 +17,6 @@ if not GEMINI_KEY or not GITHUB_TOKEN or not REPO_NAME:
 
 genai.configure(api_key=GEMINI_KEY)
 
-# Updated model initialization to prevent 404 API version mismatches
 try:
     model = genai.GenerativeModel('gemini-1.5-flash-latest')
 except Exception:
@@ -44,12 +43,12 @@ def validate_python_code(code_str):
     except SyntaxError as e:
         return False, str(e)
 
-# 4. Professional System Instructions
+# 4. System Instructions
 SYSTEM_INSTRUCTION = """
 You are a Principal DevSecOps & Application Security Engineer.
 Analyze the provided source code for vulnerabilities.
 Tasks:
-1. Identify true security vulnerabilities (e.g., Injection, Unrestricted Uploads, Insecure Imports) and ignore false positives.
+1. Identify true security vulnerabilities and ignore false positives.
 2. Assign severity levels: CRITICAL, HIGH, or MEDIUM.
 3. Patch the code WITHOUT breaking or altering the underlying business logic.
 4. Output STRICTLY a valid JSON object with the following schema:
@@ -64,10 +63,10 @@ def analyze_and_fix(file_path, code_content):
     response = model.generate_content(prompt)
     
     raw_text = response.text.strip()
-    if raw_text.startswith("```json"):
-        raw_text = raw_text.replace("```json", "", 1).rstrip("```").strip()
-    elif raw_text.startswith("```"):
-        raw_text = raw_text.replace("```", "", 1).rstrip("```").strip()
+    if "```json" in raw_text:
+        raw_text = raw_text.split("```json")[1].split("```")[0].strip()
+    elif "```" in raw_text:
+        raw_text = raw_text.split("```")[1].split("```")[0].strip()
         
     try:
         data = json.loads(raw_text)
@@ -84,7 +83,7 @@ def analyze_and_fix(file_path, code_content):
         print(f"Warning: Failed to parse AI JSON response: {e}")
         return "No critical vulnerabilities found or failed parsing.", code_content
 
-# 5. Core Execution & GitHub PR Automation
+# 5. Core Execution & GitHub Automation
 def main():
     files_to_scan = get_changed_files()
     if not files_to_scan:
@@ -99,10 +98,13 @@ def main():
     branch_name = "ai-security-patch-pro"
 
     main_branch = repo.get_branch("main")
+    
+    # Ensure branch reference exists or updates smoothly
     try:
-        repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=main_branch.commit.sha)
+        ref = repo.get_git_ref(f"heads/{branch_name}")
+        ref.edit(main_branch.commit.sha, force=True)
     except Exception:
-        pass
+        repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=main_branch.commit.sha)
 
     for file_path in files_to_scan:
         if not os.path.exists(file_path):
@@ -117,14 +119,17 @@ def main():
             has_fixes = True
             full_report += f"### 📄 `{file_path}`\n{report}\n\n---\n"
             
-            file_obj = repo.get_contents(file_path, ref=branch_name)
-            repo.update_file(
-                path=file_path,
-                message=f"security: enterprise auto-patch for {file_path}",
-                content=patched_code,
-                sha=file_obj.sha,
-                branch=branch_name
-            )
+            try:
+                file_obj = repo.get_contents(file_path, ref=branch_name)
+                repo.update_file(
+                    path=file_path,
+                    message=f"security: enterprise auto-patch for {file_path}",
+                    content=patched_code,
+                    sha=file_obj.sha,
+                    branch=branch_name
+                )
+            except Exception as e:
+                print(f"Error updating file on branch: {e}")
 
     if has_fixes:
         pr_title = "🔒 Enterprise Security Patch: Automated AI Vulnerability Remediation"
@@ -138,7 +143,7 @@ def main():
             )
             print("Success: Enterprise Pull Request created successfully!")
         else:
-            print("Info: Pull Request is already open.")
+            print("Info: Pull Request updated successfully.")
     else:
         print("Success: Code passed all enterprise security checks cleanly!")
 
