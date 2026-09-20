@@ -1,131 +1,142 @@
 import os
+import sys
+import ast
 import json
-import re
-from dotenv import load_dotenv
+import subprocess
 from github import Github
 import google.generativeai as genai
 
-load_dotenv()
-
-GEMINI_KEY = os.getenv("GEMINI_API_KEY")
+# 1. Environment Setup & Configuration
+GEMINI_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
+REPO_NAME = os.getenv("GITHUB_REPOSITORY")
+
+if not GEMINI_KEY or not GITHUB_TOKEN or not REPO_NAME:
+    print("Error: Missing required environment variables.")
+    sys.exit(1)
 
 genai.configure(api_key=GEMINI_KEY)
-model = genai.GenerativeModel('gemini-3.6-flash')
+model = genai.GenerativeModel('gemini-1.5-flash')
 
-SUPPORTED_EXTENSIONS = ('.py', '.js', '.ts', '.php', '.html', '.sql', '.java', '.go', '.rb', '.json', '.env.example')
-
-def get_all_repo_files(repo, path=""):
-    files_data = []
-    contents = repo.get_contents(path)
-    for content in contents:
-        if content.type == "dir":
-            files_data.extend(get_all_repo_files(repo, content.path))
-        elif content.path.endswith(SUPPORTED_EXTENSIONS):
-            try:
-                decoded = content.decoded_content.decode("utf-8")
-                files_data.append({"path": content.path, "content": decoded, "sha": content.sha})
-            except Exception:
-                pass
-    return files_data
-
-def create_multi_file_pr(repo_name: str, patched_files: list, summary_report: str):
-    g = Github(GITHUB_TOKEN)
-    repo = g.get_repo(repo_name)
-    main_branch = repo.get_branch("main")
-    
-    branch_name = f"full-security-fix-{os.urandom(3).hex()}"
-    repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=main_branch.commit.sha)
-    
-    for item in patched_files:
-        file_path = item["path"]
-        new_content = item["patched_code"]
-        file_contents = repo.get_contents(file_path, ref=branch_name)
-        
-        repo.update_file(
-            path=file_path,
-            message=f"Fix vulnerabilities in {file_path}",
-            content=new_content,
-            sha=file_contents.sha,
-            branch=branch_name
-        )
-    
-    pr = repo.create_pull(
-        title="🔒 Security Fix: Auto-patched by AI Agent",
-        body=f"## 🤖 Automated DevSecOps Audit Report\n\n{summary_report}",
-        head=branch_name,
-        base="main"
-    )
-    return pr.html_url
-
-def analyze_file(file_path: str, code: str):
-    prompt = f"""
-    You are an expert cybersecurity auditor. Analyze this code for ANY security vulnerabilities (SQLi, XSS, Hardcoded Secrets/Keys, RCE, CSRF, Insecure Deserialization, etc.).
-    File: {file_path}
-    Code:
-    ```
-    {code}
-    ```
-    
-    If vulnerabilities exist, fix them completely while preserving original functionality.
-    Respond strictly in valid JSON format:
-    {{
-      "vulnerable": true,
-      "issues": ["Issue 1 description", "Issue 2 description"],
-      "patched_code": "full corrected file content"
-    }}
-    """
-    
-    response = model.generate_content(
-        prompt,
-        generation_config={"response_mime_type": "application/json"}
-    )
-    
+# 2. Diff-Based File Detection
+def get_changed_files():
     try:
-        return json.loads(response.text)
-    except Exception:
-        json_match = re.search(r"\{.*\}", response.text, re.DOTALL)
-        if json_match:
-            return json.loads(json_match.group(0))
-        return {"vulnerable": False, "issues": [], "patched_code": code}
+        result = subprocess.run(
+            ["git", "diff", "--name-only", "HEAD~1", "HEAD"],
+            capture_output=True, text=True, check=True
+        )
+        files = [f.strip() for f in result.stdout.split("\n") if f.strip().endswith(".py")]
+        # Exclude test directories, virtual environments, and the main runner
+        return [f for f in files if not f.startswith("tests/") and "venv" not in f and f != "main.py"]
+    except Exception as e:
+        print(f"Warning: Could not fetch git diff, scanning default files: {e}")
+        return ["app.py"] if os.path.exists("app.py") else []
 
-def run_full_security_pipeline(repo_name: str):
-    g = Github(GITHUB_TOKEN)
-    repo = g.get_repo(repo_name)
+# 3. AST Syntax Validator
+def validate_python_code(code_str):
+    try:
+        ast.parse(code_str)
+        return True, ""
+    except SyntaxError as e:
+        return False, str(e)
+
+# 4. Professional System Instructions
+SYSTEM_INSTRUCTION = """
+You are a Principal DevSecOps & Application Security Engineer.
+Analyze the provided source code for vulnerabilities.
+Tasks:
+1. Identify true security vulnerabilities (e.g., Injection, Unrestricted Uploads, Insecure Imports) and ignore false positives.
+2. Assign severity levels: CRITICAL, HIGH, or MEDIUM.
+3. Patch the code WITHOUT breaking or altering the underlying business logic.
+4. Output STRICTLY a valid JSON object with the following schema:
+   {
+     "report": "A detailed Markdown report explaining issues found and patches applied.",
+     "patched_code": "The complete patched source code as plain text. Do NOT wrap in markdown triple backticks."
+   }
+"""
+
+def analyze_and_fix(file_path, code_content):
+    prompt = f"{SYSTEM_INSTRUCTION}\n\nFile Path: {file_path}\nCode Content:\n{code_content}"
+    response = model.generate_content(prompt)
     
-    print("🔍 [1/3] Fetching all project files from GitHub...")
-    all_files = get_all_repo_files(repo)
-    print(f"📦 Found {len(all_files)} code file(s) to scan.\n")
-    
-    patched_files = []
-    report_details = []
-    
-    print("🤖 [2/3] Scanning repository for vulnerabilities...")
-    for file_info in all_files:
-        path = file_info["path"]
-        print(f"  ➡️ Scanning: {path} ...")
+    raw_text = response.text.strip()
+    if raw_text.startswith("```json"):
+        raw_text = raw_text.replace("```json", "", 1).rstrip("```").strip()
+    elif raw_text.startswith("```"):
+        raw_text = raw_text.replace("```", "", 1).rstrip("```").strip()
         
-        result = analyze_file(path, file_info["content"])
+    try:
+        data = json.loads(raw_text)
+        report = data.get("report", "No security report provided.")
+        patched_code = data.get("patched_code", code_content)
         
-        if result.get("vulnerable") and result.get("patched_code"):
-            print(f"     ⚠️ Found {len(result.get('issues', []))} issue(s) in {path}!")
-            patched_files.append({
-                "path": path,
-                "patched_code": result["patched_code"]
-            })
-            issues_list = "\n".join([f"  - {iss}" for iss in result.get("issues", [])])
-            report_details.append(f"### 📄 `{path}`\n**Issues Found:**\n{issues_list}\n")
-        else:
-            print(f"     ✅ {path} is clean.")
+        is_valid, error = validate_python_code(patched_code)
+        if not is_valid:
+            print(f"Warning: AI generated invalid syntax for {file_path}: {error}. Reverting to original.")
+            return report, code_content
             
-    if patched_files:
-        print("\n🚀 [3/3] Creating unified Pull Request with all security fixes...")
-        summary_report = "\n".join(report_details)
-        pr_url = create_multi_file_pr(repo_name, patched_files, summary_report)
-        print(f"\n✅ All vulnerabilities fixed! Unified PR created: {pr_url}")
+        return report, patched_code
+    except Exception as e:
+        print(f"Warning: Failed to parse AI JSON response: {e}")
+        return "No critical vulnerabilities found or failed parsing.", code_content
+
+# 5. Core Execution & GitHub PR Automation
+def main():
+    files_to_scan = get_changed_files()
+    if not files_to_scan:
+        print("Success: No modified Python files to scan.")
+        sys.exit(0)
+
+    gh = Github(GITHUB_TOKEN)
+    repo = gh.get_repo(REPO_NAME)
+    
+    full_report = "## 🛡️ Enterprise AI DevSecOps Audit Report\n\n"
+    has_fixes = False
+    branch_name = "ai-security-patch-pro"
+
+    main_branch = repo.get_branch("main")
+    try:
+        repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=main_branch.commit.sha)
+    except Exception:
+        pass
+
+    for file_path in files_to_scan:
+        if not os.path.exists(file_path):
+            continue
+        print(f"Scanning {file_path}...")
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        report, patched_code = analyze_and_fix(file_path, content)
+        
+        if patched_code != content:
+            has_fixes = True
+            full_report += f"### 📄 `{file_path}`\n{report}\n\n---\n"
+            
+            file_obj = repo.get_contents(file_path, ref=branch_name)
+            repo.update_file(
+                path=file_path,
+                message=f"security: enterprise auto-patch for {file_path}",
+                content=patched_code,
+                sha=file_obj.sha,
+                branch=branch_name
+            )
+
+    if has_fixes:
+        pr_title = "🔒 Enterprise Security Patch: Automated AI Vulnerability Remediation"
+        prs = repo.get_pulls(state="open", head=f"{repo.owner.login}:{branch_name}")
+        if prs.totalCount == 0:
+            repo.create_pull(
+                title=pr_title,
+                body=full_report,
+                head=branch_name,
+                base="main"
+            )
+            print("Success: Enterprise Pull Request created successfully!")
+        else:
+            print("Info: Pull Request is already open.")
     else:
-        print("\n✅ Entire repository is secure. No vulnerabilities found in any file!")
+        print("Success: Code passed all enterprise security checks cleanly!")
 
 if __name__ == "__main__":
-    TARGET_REPO = os.getenv("GITHUB_REPOSITORY", "mohamedtaher9630-afk/security-agent-test")
-    run_full_security_pipeline(TARGET_REPO)
+    main()
