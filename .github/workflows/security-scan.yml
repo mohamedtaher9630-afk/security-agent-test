@@ -1,40 +1,497 @@
-name: DevSecOps AI Security Pipeline
+import streamlit as st
+import google.generativeai as genai
+import json
+import os
+import urllib.request
+import hashlib
+import zipfile
+import io
+from datetime import datetime
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet
+from supabase import create_client, Client
 
-on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+# Page configuration and design
+st.set_page_config(
+    page_title="DevSec AI - Security & Code Sanitizer",
+    page_icon="🛡️",
+    layout="wide"
+)
 
-jobs:
-  security-audit:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
+# Initialize Supabase client
+supabase_client: Client = None
+if SUPABASE_URL and SUPABASE_KEY:
+    try:
+        supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    except Exception:
+        pass
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
+# Session State management for persistent login & tracking
+if "user" not in st.session_state:
+    st.session_state.user = None
 
-      - name: Install Dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install google-generativeai PyGithub python-dotenv bandit
+if "audit_history" not in st.session_state:
+    st.session_state.audit_history = []
 
-      - name: Run Static Security Pre-check
-        run: |
-          bandit -r . -f json -o bandit-report.json || true
+if "total_scans" not in st.session_state:
+    st.session_state.total_scans = 0
 
-      - name: Run Enterprise AI Security Agent
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
-        run: python main.py
+if "threats_detected" not in st.session_state:
+    st.session_state.threats_detected = 0
+
+if "user_scans" not in st.session_state:
+    st.session_state.user_scans = 0
+
+if "selected_plan" not in st.session_state:
+    st.session_state.selected_plan = "Free Tier"
+
+if "language" not in st.session_state:
+    st.session_state.language = "Arabic"
+
+# Persistent Session Check via Supabase if available
+if st.session_state.user is None and supabase_client:
+    try:
+        session_res = supabase_client.auth.get_session()
+        if session_res and session_res.user:
+            st.session_state.user = session_res.user.email
+    except Exception:
+        pass
+
+FREE_LIMIT = 3
+
+# Base English Dictionary (Fallbacks and keys for dynamic translation)
+BASE_TEXTS = {
+    "title": "🛡️ DevSec AI",
+    "subtitle": "Smart Cloud SaaS for Code Sanitization, Malware Detection, SCA Dependency Analysis, and Auto-Patching.",
+    "auth_header": "👤 Cloud User Authentication",
+    "auth_mode": "Choose Action",
+    "login": "Login",
+    "register": "Register",
+    "email": "Email Address",
+    "password": "Password",
+    "submit_auth": "Submit Auth",
+    "welcome": "Welcome,",
+    "logout": "🚪 Logout",
+    "settings": "⚙️ SaaS Security Settings",
+    "api_key": "Enter Gemini API Key",
+    "license_key": "Enterprise License Key",
+    "webhook_url": "Discord / Slack Webhook URL",
+    "subscription": "💳 Subscription & Pricing",
+    "free_tier": "Free Tier",
+    "personal_plan": "👤 Personal Plan",
+    "small_business": "🏢 Small Business",
+    "enterprise_corp": "🚀 Enterprise Corp",
+    "remaining_scans": "Remaining Free Scans",
+    "limit_reached": "🚨 Free Tier Limit Reached! You have consumed your 3 free scans. Please open the Subscription menu to upgrade.",
+    "not_logged_in": "🔒 Please log in or register via the sidebar to access the DevSec AI platform.",
+    "total_scans_metric": "📊 Total Scans",
+    "threats_metric": "🚨 Threats Isolated",
+    "status_metric": "🔒 Cloud SaaS Status",
+    "active_secured": "Active & Secured",
+    "tab1": "📁 File / SCA",
+    "tab2": "📦 ZIP Project",
+    "tab3": "✍️ Code Snippet",
+    "tab4": "🔗 Direct URL",
+    "tab5": "🐙 GitHub Repo",
+    "tab6": "📊 Admin Analytics",
+    "run_audit": "🚀 Run Enterprise Security Audit & Auto-Patching",
+    "scan_spinner": "🔍 Running Deep Malware Analysis, ZIP Batch Audit, SCA Vulnerability Check & Auto-Patching...",
+    "success_secure": "✅ Project / Files are fully secure and optimized!",
+    "threat_detected": "🚨 THREAT OR VULNERABILITY DETECTED: Automated Quarantine & Auto-Patching Engaged!",
+    "sanitized_output": "🛡️ Sanitized & Production-Ready Output:",
+    "git_patch": "🛠️ Generated Git Patch / Fixes:",
+    "dl_file": "📥 Download Cleaned File",
+    "dl_patch": "📥 Download Git Patch",
+    "dl_md": "📥 Download Markdown Report",
+    "dl_pdf": "📄 Download Official PDF",
+    "admin_title": "📊 Enterprise Security Analytics & User Activity",
+    "audit_history": "User Audit History",
+    "lang_label": "🌐 Interface Language (Global Support)"
+}
+
+# Function to dynamically translate UI strings using Gemini if a non-default language is chosen
+@st.cache_data(show_spinner=False)
+def get_translated_texts(target_language, api_key_for_trans):
+    if target_language == "English":
+        return BASE_TEXTS
+    
+    if not api_key_for_trans:
+        return BASE_TEXTS
+
+    try:
+        genai.configure(api_key=api_key_for_trans)
+        model = genai.GenerativeModel(model_name='gemini-3.6-flash', generation_config={"response_mime_type": "application/json"})
+        prompt = f"""
+        Translate the following JSON dictionary values into the language: '{target_language}'. Keep the JSON keys exactly the same, only translate the string values. Do not change emojis if present.
+        
+        {json.dumps(BASE_TEXTS, ensure_ascii=False)}
+        """
+        response = model.generate_content(prompt)
+        return json.loads(response.text)
+    except Exception:
+        return BASE_TEXTS
+
+# Quick API Key check for translation support
+active_api_key = os.getenv("GEMINI_API_KEY", "")
+
+# Global Languages List
+global_languages = [
+    "Arabic", "English", "Kurdish", "Spanish", "French", "German", 
+    "Turkish", "Persian", "Chinese (Simplified)", "Japanese", 
+    "Russian", "Italian", "Portuguese", "Hindi", "Urdu", "Indonesian"
+]
+
+# Sidebar for Authentication and Settings
+with st.sidebar:
+    if st.session_state.user is not None:
+        display_alias = st.session_state.user.split('@')[0].capitalize()
+        with st.expander(f"👤 User: {display_alias}", expanded=True):
+            selected_lang = st.selectbox(
+                "🌐 Interface Language", 
+                global_languages, 
+                index=global_languages.index(st.session_state.language) if st.session_state.language in global_languages else 0
+            )
+            if selected_lang != st.session_state.language:
+                st.session_state.language = selected_lang
+                st.rerun()
+            
+            if st.button("🚪 Logout", use_container_width=True):
+                if supabase_client:
+                    try:
+                        supabase_client.auth.sign_out()
+                    except Exception:
+                        pass
+                st.session_state.user = None
+                st.session_state.user_scans = 0
+                st.session_state.selected_plan = "Free Tier"
+                st.rerun()
+
+# Load translated dictionary based on selected language and available key
+t = get_translated_texts(st.session_state.language, active_api_key)
+
+st.title(t["title"])
+st.markdown(t["subtitle"])
+
+with st.sidebar:
+    if st.session_state.user is None:
+        st.header(t["auth_header"])
+        auth_mode = st.radio(t["auth_mode"], [t["login"], t["register"]])
+        auth_email = st.text_input(t["email"])
+        auth_password = st.text_input(t["password"], type="password")
+        
+        if st.button(t["submit_auth"], type="primary"):
+            if not auth_email or not auth_password:
+                st.error("Please enter email and password.")
+            else:
+                if supabase_client:
+                    try:
+                        if auth_mode == t["register"]:
+                            res = supabase_client.auth.sign_up({"email": auth_email, "password": auth_password})
+                            st.success("✅ Account registered! Please login.")
+                        else:
+                            res = supabase_client.auth.sign_in_with_password({"email": auth_email, "password": auth_password})
+                            st.session_state.user = res.user.email
+                            st.session_state.user_scans = 0
+                            st.success("✅ Logged in successfully!")
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"Auth error: {e}")
+                else:
+                    if auth_email:
+                        st.session_state.user = auth_email
+                        st.session_state.user_scans = 0
+                        st.success("✅ Logged in (Local Simulation)")
+                        st.rerun()
+    else:
+        # 2. SaaS Security Settings Expandable Menu
+        with st.expander(t["settings"], expanded=False):
+            api_key_input = st.text_input(t["api_key"], type="password")
+            license_key_input = st.text_input(t["license_key"], type="password")
+            webhook_url_input = st.text_input(t["webhook_url"], type="password")
+
+        # 3. Subscription Plans Expandable Menu (4 Tiers with Economic Pricing)
+        with st.expander(t["subscription"], expanded=False):
+            remaining_scans = max(0, FREE_LIMIT - st.session_state.user_scans)
+            st.info(f"🟢 **{t['free_tier']} ($0):** {remaining_scans} / {FREE_LIMIT} scans")
+            
+            plan_choice = st.radio(
+                "Choose Plan / اختر الباقة الاقتصادية:",
+                [t["free_tier"], t["personal_plan"], t["small_business"], t["enterprise_corp"]]
+            )
+            
+            if plan_choice == t["personal_plan"]:
+                st.markdown("🔹 **Personal ($5/mo):**\n- Unlimited single scans\n- Markdown reports")
+                if st.button("Subscribe Personal ($5/mo)"):
+                    st.session_state.selected_plan = "Personal Plan"
+                    st.success("✅ Subscribed to Personal Plan!")
+            elif plan_choice == t["small_business"]:
+                st.markdown("🔹 **Small Business ($29/mo):**\n- ZIP Batch Scans\n- Webhook Alerts & PDF Reports")
+                if st.button("Subscribe Business ($29/mo)"):
+                    st.session_state.selected_plan = "Small Business"
+                    st.success("✅ Subscribed to Small Business!")
+            elif plan_choice == t["enterprise_corp"]:
+                st.markdown("🔹 **Enterprise Corp ($99/mo):**\n- Priority AI Processing\n- Enterprise License Key & Support")
+                if st.button("Activate Enterprise ($99/mo)"):
+                    st.session_state.selected_plan = "Enterprise Corp"
+                    st.success("✅ Activated Enterprise Corp!")
+            else:
+                st.session_state.selected_plan = "Free Tier"
+
+        is_enterprise_valid = (license_key_input.strip().startswith("ENT-")) or (st.session_state.selected_plan in [t["small_business"], t["enterprise_corp"], "Small Business", "Enterprise Corp"])
+
+# Stop execution if user is not logged in
+if st.session_state.user is None:
+    st.warning(t["not_logged_in"])
+    st.stop()
+
+# Set fallback variables if settings expander is closed
+try:
+    api_key_input
+except NameError:
+    api_key_input = ""
+    license_key_input = ""
+    webhook_url_input = ""
+    is_enterprise_valid = st.session_state.selected_plan in [t["small_business"], t["enterprise_corp"], "Small Business", "Enterprise Corp"]
+
+# Check free tier limit enforcement (Allow full access for Personal, Small Business, and Enterprise plans)
+has_unlimited_access = is_enterprise_valid or (st.session_state.selected_plan in ["Personal Plan", "Small Business", "Enterprise Corp"])
+if not has_unlimited_access and st.session_state.user_scans >= FREE_LIMIT:
+    st.error(t["limit_reached"])
+    st.stop()
+
+# Analytics Dashboard Metrics Bar
+col_m1, col_m2, col_m3 = st.columns(3)
+col_m1.metric(t["total_scans_metric"], st.session_state.total_scans)
+col_m2.metric(t["threats_metric"], st.session_state.threats_detected)
+col_m3.metric(t["status_metric"], t["active_secured"])
+
+st.markdown("---")
+
+# Tabs for input sources
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([t["tab1"], t["tab2"], t["tab3"], t["tab4"], t["tab5"], t["tab6"]])
+
+file_content = ""
+input_source_name = ""
+
+with tab1:
+    uploaded_file = st.file_uploader("Upload script, code, config (.env), or dependencies (requirements.txt / package.json)")
+    if uploaded_file is not None:
+        input_source_name = f"File/SCA: {uploaded_file.name}"
+        try:
+            file_content = uploaded_file.getvalue().decode("utf-8", errors="ignore")
+        except Exception:
+            file_content = str(uploaded_file.getvalue())
+
+with tab2:
+    can_use_zip = st.session_state.selected_plan in ["Small Business", "Enterprise Corp"] or license_key_input.strip().startswith("ENT-")
+    if not can_use_zip:
+        st.warning("📦 ZIP Batch Scanning is available starting from the **Small Business Plan ($29/mo)**. Please upgrade your subscription to unlock project archives.")
+    else:
+        uploaded_zip = st.file_uploader("Upload complete project ZIP archive for batch scanning", type="zip")
+        if uploaded_zip is not None:
+            input_source_name = f"ZIP Archive: {uploaded_zip.name}"
+            try:
+                extracted_texts = []
+                with zipfile.ZipFile(io.BytesIO(uploaded_zip.getvalue())) as z:
+                    for filename in z.namelist():
+                        if not filename.endswith('/'):
+                            with z.open(filename) as f:
+                                try:
+                                    content = f.read().decode('utf-8', errors='ignore')
+                                    extracted_texts.append(f"--- FILE: {filename} ---\n{content}\n")
+                                except Exception:
+                                    pass
+                file_content = "\n".join(extracted_texts)
+                st.success("✅ Successfully extracted contents from ZIP archive!")
+            except Exception as e:
+                st.error(f"Error reading ZIP file: {e}")
+
+with tab3:
+    code_input = st.text_area("Paste code / configuration directly:", height=200)
+    if code_input.strip() != "":
+        input_source_name = "Direct Code Snippet"
+        file_content = code_input
+
+with tab4:
+    url_input = st.text_input("Enter direct download link / URL to analyze:")
+    if url_input.strip() != "":
+        input_source_name = f"URL: {url_input}"
+        try:
+            with st.spinner("🌐 Fetching remote content securely..."):
+                req = urllib.request.Request(url_input, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    file_content = response.read(50000).decode("utf-8", errors="ignore")
+                st.success("✅ Remote URL content fetched successfully!")
+        except Exception as e:
+            st.error(f"Error fetching URL: {e}")
+
+with tab5:
+    github_input = st.text_input("Enter GitHub repository raw file URL:")
+    if github_input.strip() != "":
+        input_source_name = f"GitHub Repo: {github_input}"
+        try:
+            with st.spinner("🐙 Fetching GitHub file content..."):
+                raw_url = github_input.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+                req = urllib.request.Request(raw_url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    file_content = response.read(60000).decode("utf-8", errors="ignore")
+                st.success("✅ GitHub file loaded successfully!")
+        except Exception as e:
+            st.error(f"Error fetching GitHub file: {e}")
+
+with tab6:
+    st.subheader(t["admin_title"])
+    display_alias = st.session_state.user.split('@')[0].capitalize()
+    st.markdown(f"Active User: **{display_alias}** | Plan: **{st.session_state.selected_plan}**")
+    col_a1, col_a2 = st.columns(2)
+    col_a1.metric("Total Processed Scans", st.session_state.total_scans)
+    col_a2.metric("Total Quarantined Threats", st.session_state.threats_detected)
+    
+    if st.session_state.audit_history:
+        st.markdown(f"### {t['audit_history']}")
+        for h in st.session_state.audit_history:
+            st.write(f"- **Time:** {h['time']} | **Target:** {h['type']} | **Result:** {h['status']}")
+    else:
+        st.info("No audit logs available for analysis yet.")
+
+if st.button(t["run_audit"], type="primary"):
+    gemini_key = api_key_input or os.getenv("GEMINI_API_KEY")
+    if not gemini_key:
+        st.error("Please provide your Gemini API Key in the Security Settings expander!")
+    else:
+        genai.configure(api_key=gemini_key)
+        if not file_content.strip():
+            st.warning("Please provide a file, ZIP archive, code snippet, URL, or GitHub link to scan.")
+        else:
+            with st.spinner(t["scan_spinner"]):
+                try:
+                    file_hash = hashlib.sha256(file_content.encode('utf-8', errors='ignore')).hexdigest()
+                    
+                    generation_config = {"response_mime_type": "application/json", "temperature": 0.1}
+                    model = genai.GenerativeModel(model_name='gemini-3.6-flash', generation_config=generation_config)
+                    
+                    prompt = f"""
+                    You are an elite cybersecurity expert, SCA auditor, and DevSecOps automated system.
+                    Analyze the following content (Hash: {file_hash}) and respond in language: {st.session_state.language}:
+                    1. Detect malware, ransomware, backdoors, or malicious scripts.
+                    2. Check software composition (SCA): identify outdated libraries, vulnerable versions (CVEs) in requirements.txt or package.json.
+                    3. Detect hardcoded secrets, database passwords, or API keys.
+                    4. Fix syntax errors and generate clean, secure production code.
+                    
+                    Content:
+                    ```
+                    {file_content}
+                    ```
+
+                    Respond strictly in JSON with these keys:
+                    - "vulnerable_or_malicious": boolean
+                    - "threat_analysis": string (Detailed Markdown explanation of vulnerabilities, CVEs, or malware found)
+                    - "sanitized_code": string (Clean, secure code or updated project files ready for deployment)
+                    - "git_patch_simulation": string (A unified git diff / patch block representing the structural fixes applied)
+                    """
+                    
+                    response = model.generate_content(prompt)
+                    result = json.loads(response.text)
+                    
+                    st.session_state.total_scans += 1
+                    if not has_unlimited_access:
+                        st.session_state.user_scans += 1
+                        
+                    is_threat = result.get("vulnerable_or_malicious", False)
+                    if is_threat:
+                        st.session_state.threats_detected += 1
+                        
+                    threat_analysis = result.get("threat_analysis", "")
+                    sanitized_code = result.get("sanitized_code", "")
+                    git_patch = result.get("git_patch_simulation", "No patch adjustments required.")
+                    status_str = "🚨 Quarantined & Patched" if is_threat else "✅ Clean & Secure"
+                    
+                    st.session_state.audit_history.append({
+                        "time": datetime.now().strftime("%H:%M:%S"),
+                        "type": input_source_name[:30],
+                        "status": status_str
+                    })
+                    
+                    can_use_webhook = st.session_state.selected_plan in ["Small Business", "Enterprise Corp"] or license_key_input.strip().startswith("ENT-")
+                    if is_threat and webhook_url_input.strip() and can_use_webhook:
+                        try:
+                            webhook_data = json.dumps({"content": f"🚨 **Security Alert** [{st.session_state.user}]: Threat detected in `{input_source_name}`! Hash: `{file_hash}`"}).encode('utf-8')
+                            req_wh = urllib.request.Request(webhook_url_input.strip(), data=webhook_data, headers={'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0'})
+                            urllib.request.urlopen(req_wh, timeout=5)
+                        except Exception:
+                            pass
+                    
+                    st.markdown("---")
+                    st.info(f"🔑 **SHA-256 Hash:** `{file_hash}`")
+                    
+                    if is_threat:
+                        st.error(t["threat_detected"])
+                        st.markdown(threat_analysis)
+                    else:
+                        st.success(t["success_secure"])
+                        if threat_analysis:
+                            st.markdown(threat_analysis)
+                            
+                    st.subheader(t["sanitized_output"])
+                    st.code(sanitized_code)
+                    
+                    st.subheader(t["git_patch"])
+                    st.code(git_patch, language="diff")
+                    
+                    col_d1, col_d2, col_d3, col_d4 = st.columns(4)
+                    
+                    with col_d1:
+                        st.download_button(
+                            label=t["dl_file"],
+                            data=sanitized_code,
+                            file_name="sanitized_output.txt",
+                            mime="text/plain"
+                        )
+                    with col_d2:
+                        st.download_button(
+                            label=t["dl_patch"],
+                            data=git_patch,
+                            file_name="fix_patch.diff",
+                            mime="text/plain"
+                        )
+                    with col_d3:
+                        st.download_button(
+                            label=t["dl_md"],
+                            data=f"# Security Report\n**User:** {st.session_state.user}\n**Hash:** {file_hash}\n**Status:** {status_str}\n\n## Analysis\n{threat_analysis}",
+                            file_name="security_report.md",
+                            mime="text/markdown"
+                        )
+                    with col_d4:
+                        can_download_pdf = st.session_state.selected_plan in ["Small Business", "Enterprise Corp"] or license_key_input.strip().startswith("ENT-")
+                        if can_download_pdf:
+                            buffer = io.BytesIO()
+                            doc = SimpleDocTemplate(buffer, pagesize=letter)
+                            styles = getSampleStyleSheet()
+                            story = [
+                                Paragraph("Enterprise Security Audit Report", styles['Title']),
+                                Spacer(1, 10),
+                                Paragraph(f"<b>User:</b> {st.session_state.user}", styles['Normal']),
+                                Paragraph(f"<b>Status:</b> {status_str}", styles['Normal']),
+                                Paragraph(f"<b>SHA-256 Hash:</b> {file_hash}", styles['Normal']),
+                                Spacer(1, 10),
+                                Paragraph("Findings & SCA Vulnerabilities:", styles['Heading2']),
+                                Paragraph(threat_analysis.replace('\n', '<br/>'), styles['Normal'])
+                            ]
+                            doc.build(story)
+                            buffer.seek(0)
+                            
+                            st.download_button(
+                                label=t["dl_pdf"],
+                                data=buffer.getvalue(),
+                                file_name="security_report.pdf",
+                                mime="application/pdf"
+                            )
+                        else:
+                            st.info("🔒 PDF reports require Small Business Plan ($29/mo)")
+                        
+                except Exception as e:
+                    st.error(f"Processing error: {e}")
