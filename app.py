@@ -263,7 +263,7 @@ except NameError:
 # 🔑 تجاوز الصلاحيات للمالك (بناءً على البريد الإلكتروني المدخل)
 # =====================================================================
 current_user = st.session_state.get("user", "")
-is_owner = (current_user.strip().lower() == MY_EMAIL.strip().lower() and MY_EMAIL != "ضع_ايميلك_هنا")
+is_owner = (current_user.strip().lower() == MY_EMAIL.strip().lower() and MY_EMAIL != "mohamed.tahe9630@gmail.comا")
 
 # Check free tier limit enforcement (Allow full access for Owner, Personal, Small Business, and Enterprise plans)
 has_unlimited_access = is_owner or is_enterprise_valid or (st.session_state.selected_plan in ["Personal Plan", "Small Business", "Enterprise Corp"])
@@ -384,7 +384,7 @@ if st.button(t["run_audit"], type="primary"):
                     file_hash = hashlib.sha256(file_content.encode('utf-8', errors='ignore')).hexdigest()
                     
                     generation_config = {"response_mime_type": "application/json", "temperature": 0.1}
-                    model = genai.GenerativeModel(model_name='gemini-2.5-flash', generation_config=generation_config)
+                    model = genai.GenerativeModel(model_name='gemini-3.6-flash', generation_config=generation_config)
                     
                     prompt = f"""
                     You are an elite cybersecurity expert, SCA auditor, and DevSecOps automated system.
