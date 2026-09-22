@@ -12,6 +12,8 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from supabase import create_client, Client
 
+MY_EMAIL = "mohamedtaher9630@gmail.com"
+
 # Page configuration and design
 st.set_page_config(
     page_title="DevSec AI - Security & Code Sanitizer",
@@ -257,8 +259,18 @@ except NameError:
     webhook_url_input = ""
     is_enterprise_valid = st.session_state.selected_plan in [t["small_business"], t["enterprise_corp"], "Small Business", "Enterprise Corp"]
 
-# Check free tier limit enforcement (Allow full access for Personal, Small Business, and Enterprise plans)
-has_unlimited_access = is_enterprise_valid or (st.session_state.selected_plan in ["Personal Plan", "Small Business", "Enterprise Corp"])
+# =====================================================================
+# 🔑 تجاوز الصلاحيات للمالك (بناءً على البريد الإلكتروني المدخل)
+# =====================================================================
+current_user = st.session_state.get("user", "")
+is_owner = (current_user.strip().lower() == MY_EMAIL.strip().lower() and MY_EMAIL != "ضع_ايميلك_هنا")
+
+# Check free tier limit enforcement (Allow full access for Owner, Personal, Small Business, and Enterprise plans)
+has_unlimited_access = is_owner or is_enterprise_valid or (st.session_state.selected_plan in ["Personal Plan", "Small Business", "Enterprise Corp"])
+
+if is_owner:
+    st.sidebar.success("✨ مرحباً بك أيها المالك! تم منحك صلاحيات مطلقة غير محدودة.")
+
 if not has_unlimited_access and st.session_state.user_scans >= FREE_LIMIT:
     st.error(t["limit_reached"])
     st.stop()
@@ -287,7 +299,7 @@ with tab1:
             file_content = str(uploaded_file.getvalue())
 
 with tab2:
-    can_use_zip = st.session_state.selected_plan in ["Small Business", "Enterprise Corp"] or license_key_input.strip().startswith("ENT-")
+    can_use_zip = is_owner or st.session_state.selected_plan in ["Small Business", "Enterprise Corp"] or license_key_input.strip().startswith("ENT-")
     if not can_use_zip:
         st.warning("📦 ZIP Batch Scanning is available starting from the **Small Business Plan ($29/mo)**. Please upgrade your subscription to unlock project archives.")
     else:
@@ -416,7 +428,7 @@ if st.button(t["run_audit"], type="primary"):
                         "status": status_str
                     })
                     
-                    can_use_webhook = st.session_state.selected_plan in ["Small Business", "Enterprise Corp"] or license_key_input.strip().startswith("ENT-")
+                    can_use_webhook = is_owner or st.session_state.selected_plan in ["Small Business", "Enterprise Corp"] or license_key_input.strip().startswith("ENT-")
                     if is_threat and webhook_url_input.strip() and can_use_webhook:
                         try:
                             webhook_data = json.dumps({"content": f"🚨 **Security Alert** [{st.session_state.user}]: Threat detected in `{input_source_name}`! Hash: `{file_hash}`"}).encode('utf-8')
@@ -466,7 +478,7 @@ if st.button(t["run_audit"], type="primary"):
                             mime="text/markdown"
                         )
                     with col_d4:
-                        can_download_pdf = st.session_state.selected_plan in ["Small Business", "Enterprise Corp"] or license_key_input.strip().startswith("ENT-")
+                        can_download_pdf = is_owner or st.session_state.selected_plan in ["Small Business", "Enterprise Corp"] or license_key_input.strip().startswith("ENT-")
                         if can_download_pdf:
                             buffer = io.BytesIO()
                             doc = SimpleDocTemplate(buffer, pagesize=letter)
